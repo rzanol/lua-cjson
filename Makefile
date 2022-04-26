@@ -11,17 +11,23 @@
 ##                          multi-threaded application. Requries _pthreads_.
 
 ##### Build defaults #####
-LUA_VERSION =       5.1
+LUA_VERSION =       5.4
 TARGET =            cjson.so
 PREFIX =            /usr/local
-#CFLAGS =            -g -Wall -pedantic -fno-inline
-CFLAGS =            -O3 -Wall -pedantic -DNDEBUG -g
 CJSON_CFLAGS =      -fpic
 CJSON_LDFLAGS =     -shared
-LUA_INCLUDE_DIR ?=   $(PREFIX)/include
-LUA_CMODULE_DIR ?=   $(PREFIX)/lib/lua/$(LUA_VERSION)
-LUA_MODULE_DIR ?=    $(PREFIX)/share/lua/$(LUA_VERSION)
-LUA_BIN_DIR ?=       $(PREFIX)/bin
+ifdef GWC_ARCH
+BD = 								cmp/$(GWC_ARCH)/
+LUA_INCLUDE_DIR ?=  ../lua
+else
+BD =								./
+#CFLAGS =            -g -Wall -pedantic -fno-inline
+CFLAGS =            -O3 -Wall -pedantic -DNDEBUG
+LUA_INCLUDE_DIR =   $(PREFIX)/include
+LUA_CMODULE_DIR =   $(PREFIX)/lib/lua/$(LUA_VERSION)
+LUA_MODULE_DIR =    $(PREFIX)/share/lua/$(LUA_VERSION)
+LUA_BIN_DIR =       $(PREFIX)/bin
+endif
 
 ##### Platform overrides #####
 ##
@@ -82,12 +88,14 @@ ASCIIDOC =          asciidoc
 BUILD_CFLAGS =      -I$(LUA_INCLUDE_DIR) $(CJSON_CFLAGS)
 OBJS =              lua_cjson.o strbuf.o $(FPCONV_OBJS)
 
+$(shell mkdir -p "$(BD)")
+
 .PHONY: all clean install install-extra doc
 
 .SUFFIXES: .html .txt
 
 .c.o:
-	$(CC) -c $(CFLAGS) $(CPPFLAGS) $(BUILD_CFLAGS) -o $@ $<
+	$(CC) -c $(CFLAGS) $(CPPFLAGS) $(BUILD_CFLAGS) -o $(BD)/$@ $<
 
 .txt.html:
 	$(ASCIIDOC) -n -a toc $<
@@ -97,7 +105,8 @@ all: $(TARGET)
 doc: manual.html performance.html
 
 $(TARGET): $(OBJS)
-	$(CC) $(LDFLAGS) $(CJSON_LDFLAGS) -o $@ $(OBJS)
+	mkdir -p $(BD)
+	$(CC) $(LDFLAGS) $(CJSON_LDFLAGS) -o $(BD)/$@ $(addprefix $(BD)/, $(OBJS))
 
 install: $(TARGET)
 	mkdir -p $(DESTDIR)$(LUA_CMODULE_DIR)
@@ -118,4 +127,4 @@ install-extra:
 	cd tests; chmod $(DATAPERM) $(TEST_FILES); chmod $(EXECPERM) *.lua *.pl
 
 clean:
-	rm -f *.o $(TARGET)
+	rm -f $(BD)/*.o $(BD)/$(TARGET)
