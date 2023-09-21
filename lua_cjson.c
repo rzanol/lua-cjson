@@ -746,7 +746,7 @@ static void json_append_data(lua_State *l, json_config_t *cfg,
         if (has_metatable) {
             // Check if the MT is the empty array
             lua_getmetatable(l, -1);
-            lua_pushlightuserdata(l, (void *)&json_empty_array));
+            lua_pushlightuserdata(l, (void *)&json_empty_array);
             lua_rawget(l, LUA_REGISTRYINDEX);
             as_array = lua_rawequal(l, -1, -2);
             lua_pop(l, 2);
