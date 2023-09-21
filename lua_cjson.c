@@ -74,11 +74,18 @@
 #define DEFAULT_DECODE_INVALID_NUMBERS 1
 #define DEFAULT_ENCODE_KEEP_BUFFER 0
 #define DEFAULT_ENCODE_NUMBER_PRECISION 14
+#define DEFAULT_ENCODE_EMPTY_TABLE_AS_OBJECT 1
+#define DEFAULT_DECODE_ARRAY_WITH_ARRAY_MT 0
 
 #ifdef DISABLE_INVALID_NUMBERS
 #undef DEFAULT_DECODE_INVALID_NUMBERS
 #define DEFAULT_DECODE_INVALID_NUMBERS 0
 #endif
+
+// Unique key to index the empty array MT into the Lua registry
+static char json_empty_array;
+// Unique key to index an empty array into the Lua registry
+static char json_array;
 
 typedef enum {
     T_OBJ_BEGIN,
@@ -130,9 +137,11 @@ typedef struct {
     int encode_invalid_numbers;     /* 2 => Encode as "null" */
     int encode_number_precision;
     int encode_keep_buffer;
+    int encode_empty_table_as_object;
 
     int decode_invalid_numbers;
     int decode_max_depth;
+    int decode_array_with_array_mt;
 } json_config_t;
 
 typedef struct {
@@ -306,6 +315,22 @@ static int json_cfg_encode_number_precision(lua_State *l)
     return json_integer_option(l, 1, &cfg->encode_number_precision, 1, 14);
 }
 
+/* Configures how to treat an empty Lua table when encoding */
+static int json_cfg_encode_empty_table_as_object(lua_State *l)
+{
+    json_config_t *cfg = json_arg_init(l, 1);
+
+    return json_enum_option(l, 1, &cfg->encode_empty_table_as_object, NULL, 1);
+}
+
+/* Configures how to decode arrays */
+static int json_cfg_decode_array_with_array_mt(lua_State *l)
+{
+    json_config_t *cfg = json_arg_init(l, 1);
+
+    return json_enum_option(l, 1, &cfg->decode_array_with_array_mt, NULL, 1);
+}
+
 /* Configures JSON encoding buffer persistence */
 static int json_cfg_encode_keep_buffer(lua_State *l)
 {
@@ -396,6 +421,8 @@ static void json_create_config(lua_State *l)
     cfg->decode_invalid_numbers = DEFAULT_DECODE_INVALID_NUMBERS;
     cfg->encode_keep_buffer = DEFAULT_ENCODE_KEEP_BUFFER;
     cfg->encode_number_precision = DEFAULT_ENCODE_NUMBER_PRECISION;
+    cfg->encode_empty_table_as_object = DEFAULT_ENCODE_EMPTY_TABLE_AS_OBJECT;
+    cfg->decode_array_with_array_mt = DEFAULT_DECODE_ARRAY_WITH_ARRAY_MT;
 
 #if DEFAULT_ENCODE_KEEP_BUFFER > 0
     strbuf_init(&cfg->encode_buf, 0);
@@ -673,6 +700,8 @@ static void json_append_data(lua_State *l, json_config_t *cfg,
                              int current_depth, strbuf_t *json)
 {
     int len;
+    int as_array = 0;
+    int has_metatable;
 
     switch (lua_type(l, -1)) {
     case LUA_TSTRING:
@@ -690,11 +719,45 @@ static void json_append_data(lua_State *l, json_config_t *cfg,
     case LUA_TTABLE:
         current_depth++;
         json_check_encode_depth(l, cfg, current_depth, json);
-        len = lua_array_length(l, cfg, json);
-        if (len > 0)
+
+        has_metatable = lua_getmetatable(l, -1);
+
+        if (has_metatable) {
+            // Check if the MT is the array MT
+            lua_pushlightuserdata(l, (void *)&json_array);
+            lua_rawget(l, LUA_REGISTRYINDEX);
+            as_array = lua_rawequal(l, -1, -2);
+            lua_pop(l, 2);
+        }
+
+        if (as_array) {
+            len = lua_rawlen(l, -1);
             json_append_array(l, cfg, current_depth, json, len);
-        else
-            json_append_object(l, cfg, current_depth, json);
+            break;
+        } 
+        
+        len = lua_array_length(l, cfg, json);
+
+        if (len > 0 || (len == 0 && !cfg->encode_empty_table_as_object)) {
+            json_append_array(l, cfg, current_depth, json, len);
+            break;
+        }
+
+        if (has_metatable) {
+            // Check if the MT is the empty array
+            lua_getmetatable(l, -1);
+            lua_pushlightuserdata(l, (void *)&json_empty_array));
+            lua_rawget(l, LUA_REGISTRYINDEX);
+            as_array = lua_rawequal(l, -1, -2);
+            lua_pop(l, 2);
+
+            if (as_array) {
+                json_append_array(l, cfg, current_depth, json, 0);
+                break;
+            }
+        }
+
+        json_append_object(l, cfg, current_depth, json);
         break;
     case LUA_TNIL:
         strbuf_append_mem(json, "null", 4);
@@ -702,8 +765,11 @@ static void json_append_data(lua_State *l, json_config_t *cfg,
     case LUA_TLIGHTUSERDATA:
         if (lua_touserdata(l, -1) == NULL) {
             strbuf_append_mem(json, "null", 4);
-            break;
+        } else if (lua_touserdata(l, -1) == (void *)&json_array) {
+            // encode `cjson.empty_array` as an empty array
+            json_append_array(l, cfg, current_depth, json, 0);
         }
+        break;
     default:
         /* Remaining types (LUA_TFUNCTION, LUA_TUSERDATA, LUA_TTHREAD,
          * and LUA_TLIGHTUSERDATA) cannot be serialised */
@@ -1206,6 +1272,13 @@ static void json_parse_array_context(lua_State *l, json_parse_t *json)
 
     lua_newtable(l);
 
+    /* set array_mt on the table at the top of the stack */
+    if (json->cfg->decode_array_with_array_mt) {
+        lua_pushlightuserdata(l, (void *)&json_array);
+        lua_rawget(l, LUA_REGISTRYINDEX);
+        lua_setmetatable(l, -2);
+    }
+
     json_next_token(json, &token);
 
     /* Handle empty arrays */
@@ -1358,6 +1431,8 @@ static int lua_cjson_new(lua_State *l)
     luaL_Reg reg[] = {
         { "encode", json_encode },
         { "decode", json_decode },
+        { "encode_empty_table_as_object", json_cfg_encode_empty_table_as_object },
+        { "decode_array_with_array_mt", json_cfg_decode_array_with_array_mt },
         { "encode_sparse_array", json_cfg_encode_sparse_array },
         { "encode_max_depth", json_cfg_encode_max_depth },
         { "decode_max_depth", json_cfg_decode_max_depth },
@@ -1372,6 +1447,29 @@ static int lua_cjson_new(lua_State *l)
     /* Initialise number conversions */
     fpconv_init();
 
+    /* Test if array metatables are in registry */
+    lua_pushlightuserdata(l, (void *)&json_empty_array);
+    lua_rawget(l, LUA_REGISTRYINDEX);
+    if (lua_isnil(l, -1)) {
+        /* Create array metatables.
+         *
+         * If multiple calls to lua_cjson_new() are made,
+         * this prevents overriding the tables at the given
+         * registry's index with a new one.
+         */
+        lua_pop(l, 1);
+
+        /* empty_array_mt */
+        lua_pushlightuserdata(l, (void *)&json_empty_array);
+        lua_newtable(l);
+        lua_rawset(l, LUA_REGISTRYINDEX);
+
+        /* array_mt */
+        lua_pushlightuserdata(l, (void *)&json_array);
+        lua_newtable(l);
+        lua_rawset(l, LUA_REGISTRYINDEX);
+    }
+
     /* cjson module table */
     lua_newtable(l);
 
@@ -1382,6 +1480,20 @@ static int lua_cjson_new(lua_State *l)
     /* Set cjson.null */
     lua_pushlightuserdata(l, NULL);
     lua_setfield(l, -2, "null");
+
+    /* Set cjson.empty_array_mt */
+    lua_pushlightuserdata(l, (void *)&json_empty_array);
+    lua_rawget(l, LUA_REGISTRYINDEX);
+    lua_setfield(l, -2, "empty_array_mt");
+
+    /* Set cjson.array_mt */
+    lua_pushlightuserdata(l, (void *)&json_array);
+    lua_rawget(l, LUA_REGISTRYINDEX);
+    lua_setfield(l, -2, "array_mt");
+
+    /* Set cjson.empty_array */
+    lua_pushlightuserdata(l, (void *)&json_array);
+    lua_setfield(l, -2, "empty_array");
 
     /* Set module name / version fields */
     lua_pushliteral(l, CJSON_MODNAME);
